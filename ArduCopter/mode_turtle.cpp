@@ -39,9 +39,9 @@ void ModeTurtle::arm_motors()
     //change_motor_direction(true);
 
     // disable throttle and gps failsafe
-    g.failsafe_throttle.set(FS_THR_DISABLED);
-    g.failsafe_gcs.set(FS_GCS_DISABLED);
-    g.fs_ekf_action.set(0);
+    //g.failsafe_throttle.set(FS_THR_DISABLED);
+    //g.failsafe_gcs.set(FS_GCS_DISABLED);
+    //g.fs_ekf_action.set(0);
 
     // arm
     motors->armed(true);
@@ -76,9 +76,9 @@ void ModeTurtle::disarm_motors()
     hal.rcout->enable_channel_mask_updates();
 
     // re-enable failsafes
-    g.failsafe_throttle.load();
-    g.failsafe_gcs.load();
-    g.fs_ekf_action.load();
+    //g.failsafe_throttle.load();
+    //g.failsafe_gcs.load();
+    //g.fs_ekf_action.load();
 }
 
 void ModeTurtle::change_motor_direction(bool reverse)
@@ -109,12 +109,16 @@ void ModeTurtle::run()
 
 
 }
-/*
+
 // actually write values to the motors
 void ModeTurtle::output_to_motors()
 {
-
-    if (failsafe.radio || failsafe.battery || failsafe.gcs || failsafe.ekf || failsafe.gps) {
+    // Print RSSI value
+    int16_t rssi_value = hal.rcin->get_rssi();
+    gcs().send_text(MAV_SEVERITY_INFO, "RSSI: %d", rssi_value);
+    // Check for failsafe conditions
+    if (copter.failsafe.radio) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "Failsafe: Radio");
         disarm_motors();
         return;
     }
@@ -122,50 +126,7 @@ void ModeTurtle::output_to_motors()
     const int16_t rc_channel_5_value = rc().channel(4)->get_radio_in(); // RC channel 5 corresponds to index 4 (0-based index)
 
     if (rc_channel_5_value < 1800) {
-        disarm_motors();
-        return;
-    }
-
-    arm_motors();
-    const bool allow_output = motors->armed() && motors->get_interlock();
- 
-
-    for (uint8_t i = 0; i < 2; ++i) {
-        if (!motors->is_motor_enabled(i)) {
-            return;
-        }
-        if (!allow_output) {
-            motors->rc_write(i, motors->get_pwm_output_min());
-            return;
-        }
-        const int16_t rc_channel_0_value = rc().channel(i)->get_radio_in();
-        float normalized_input = (rc_channel_0_value - 988.0f) / (2012.0f - 988.0f);
-        normalized_input = constrain_float(normalized_input, 0.0f, 1.0f);
-        int16_t pwm = motors->get_pwm_output_min() + (motors->get_pwm_output_max() - motors->get_pwm_output_min()) *  fabsf(normalized_input);
-
-
-        motors->rc_write(i, pwm);
-    }
-}
-*/
-
-
-//Omnicopter FC
-
-
-// actually write values to the motors
-void ModeTurtle::output_to_motors()
-{
-
-    if (failsafe.radio || failsafe.battery || failsafe.gcs || failsafe.ekf || failsafe.gps) {
-        disarm_motors();
-        return;
-    }
-
-
-    const int16_t rc_channel_5_value = rc().channel(4)->get_radio_in(); // RC channel 5 corresponds to index 4 (0-based index)
-
-    if (rc_channel_5_value < 1800) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "Failsafe: RC Channel 5 Low");
         disarm_motors();
         return;
     }
@@ -183,21 +144,16 @@ void ModeTurtle::output_to_motors()
         const int16_t rc_channel_0_value = rc().channel(i)->get_radio_in();
         float normalized_input = (rc_channel_0_value - 988.0f) / (2012.0f - 988.0f);
         normalized_input = constrain_float(normalized_input, 0.0f, 1.0f);
-        int16_t pwm = motors->get_pwm_output_min() + (motors->get_pwm_output_max() - motors->get_pwm_output_min()) *  fabsf(normalized_input);
-
+        int16_t pwm = motors->get_pwm_output_min() + (motors->get_pwm_output_max() - motors->get_pwm_output_min()) * fabsf(normalized_input);
 
         motors->rc_write(i, pwm);
     }
 
+    int16_t neutral = 1500;
+    motors->rc_write(2, neutral);
+    motors->rc_write(3, neutral);
 
-    //gcs().send_text(MAV_SEVERITY_INFO, "Normalized Input: %d", pwm);
 
-
-    int16_t netural = 1500;
-    motors->rc_write(2, netural);
-    motors->rc_write(3, netural);
 }
-    
-
 
 #endif
