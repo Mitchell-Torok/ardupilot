@@ -133,7 +133,7 @@ void ModeTurtle::output_to_motors()
 
     arm_motors();
     const bool allow_output = motors->armed() && motors->get_interlock();
-    for (uint8_t i = 0; i < 2; ++i) {
+    for (uint8_t i = 0; i < 4; ++i) {
         if (!motors->is_motor_enabled(i)) {
             return;
         }
@@ -141,18 +141,13 @@ void ModeTurtle::output_to_motors()
             motors->rc_write(i, motors->get_pwm_output_min());
             return;
         }
-        const int16_t rc_channel_0_value = rc().channel(i)->get_radio_in();
-        float normalized_input = (rc_channel_0_value - 988.0f) / (2012.0f - 988.0f);
+        const int16_t rc_channel_i_value = rc().channel(i)->get_radio_in();
+        float normalized_input = (rc_channel_i_value - 988.0f) / (2012.0f - 988.0f);
         normalized_input = constrain_float(normalized_input, 0.0f, 1.0f);
         int16_t pwm = motors->get_pwm_output_min() + (motors->get_pwm_output_max() - motors->get_pwm_output_min()) * fabsf(normalized_input);
 
         motors->rc_write(i, pwm);
     }
-
-    int16_t neutral = 1500;
-    motors->rc_write(2, neutral);
-    motors->rc_write(3, neutral);
-
 
 }
 
