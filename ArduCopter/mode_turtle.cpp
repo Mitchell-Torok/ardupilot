@@ -116,6 +116,7 @@ void ModeTurtle::output_to_motors()
     // Print RSSI value
     int16_t rssi_value = hal.rcin->get_rssi();
     gcs().send_text(MAV_SEVERITY_INFO, "RSSI: %d", rssi_value);
+
     // Check for failsafe conditions
     if (copter.failsafe.radio) {
         gcs().send_text(MAV_SEVERITY_WARNING, "Failsafe: Radio");
@@ -133,22 +134,37 @@ void ModeTurtle::output_to_motors()
 
     arm_motors();
     const bool allow_output = motors->armed() && motors->get_interlock();
-    for (uint8_t i = 0; i < 4; ++i) {
+
+    for (uint8_t i = 0; i < 8; ++i) {
         if (!motors->is_motor_enabled(i)) {
-            return;
+            continue;
         }
         if (!allow_output) {
             motors->rc_write(i, motors->get_pwm_output_min());
-            return;
+            continue;
         }
-        const int16_t rc_channel_i_value = rc().channel(i)->get_radio_in();
+
+        // Map motor index to RC channel
+        uint8_t rc_channel_index;
+        if (i < 4) {
+            rc_channel_index = i; // Motors 1-4: RC channels 0-3
+        } else {
+            rc_channel_index = i + 1; // Motors 5-8: RC channels 5-8
+        }
+
+        RC_Channel* rc_chan = rc().channel(rc_channel_index);
+        if (rc_chan == nullptr) {
+            motors->rc_write(i, motors->get_pwm_output_min());
+            continue;
+        }
+
+        const int16_t rc_channel_i_value = rc_chan->get_radio_in();
         float normalized_input = (rc_channel_i_value - 988.0f) / (2012.0f - 988.0f);
         normalized_input = constrain_float(normalized_input, 0.0f, 1.0f);
         int16_t pwm = motors->get_pwm_output_min() + (motors->get_pwm_output_max() - motors->get_pwm_output_min()) * fabsf(normalized_input);
 
         motors->rc_write(i, pwm);
     }
-
 }
 
 #endif
