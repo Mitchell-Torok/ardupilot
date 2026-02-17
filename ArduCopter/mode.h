@@ -1853,6 +1853,9 @@ private:
     float motors_output;
     Vector2f motors_input;
     uint32_t last_throttle_warning_output_ms;
+    float target_pitch_integrated;
+    float target_roll_integrated;
+    float target_yaw_integrated;
 };
 #endif
 

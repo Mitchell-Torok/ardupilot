@@ -41,13 +41,15 @@ RC7_TRIM        1500.000000
 RC8_MAX         2000.000000
 RC8_MIN         1000.000000
 RC8_TRIM        1500.000000
-FLTMODE1        7
-FLTMODE2        9
-FLTMODE3        6
-FLTMODE4        3
-FLTMODE5        5
-FLTMODE6		0
+FLTMODE1        28
+FLTMODE2        28
+FLTMODE3        28
+FLTMODE4        28
+FLTMODE5        28
+FLTMODE6		28
 SIM_BARO_RND    0
+MOT_3D_ADMSK    15
+MOT_3D_DEADZONE 50
 # we need small INS_ACC offsets so INS is recognised as being calibrated
 INS_ACCOFFS_X   0.001
 INS_ACCOFFS_Y   0.001
@@ -71,6 +73,8 @@ MOT_THST_EXPO   0.65
 MOT_THST_HOVER  0.39
 MOT_BAT_VOLT_MIN 9.6
 MOT_BAT_VOLT_MAX 12.8
+MOT_PWM_TYPE 4
+SERVO_DSHOT_ESC 1
 # flightmodes
 # switch 1 Circle
 # switch 2 LAND
