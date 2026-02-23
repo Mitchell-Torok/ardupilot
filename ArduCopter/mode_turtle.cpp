@@ -8,6 +8,7 @@
 
 bool ModeTurtle::init(bool ignore_checks)
 {
+    
     // do not enter the mode when already armed or when flying
     if (motors->armed() || SRV_Channels::get_dshot_esc_type() == 0) {
         return false;
@@ -99,15 +100,12 @@ void ModeTurtle::output_to_motors()
     const float kc = 1.2e-06f;
     const float max_omega = 1634.0f;
 
-
     if (copter.failsafe.radio || rc().channel(4)->get_radio_in() < 1800) {
-
         uint16_t neutral_pwm = 1500;
         motors->rc_write(0, neutral_pwm);
         motors->rc_write(1, neutral_pwm);
         motors->rc_write(2, neutral_pwm);
         motors->rc_write(3, neutral_pwm);
-
 
         gcs().send_text(MAV_SEVERITY_INFO, "Disarmed: failsafe=%d RC5=%d", copter.failsafe.radio, rc().channel(4)->get_radio_in());
         disarm_motors();
@@ -117,7 +115,7 @@ void ModeTurtle::output_to_motors()
     // 2. State & Safety
     const float pitch_deg = ahrs.get_pitch();
     const float roll_deg  = ahrs.get_roll();
-    const float yaw_deg = ahrs.get_yaw();
+    const float yaw_deg   = ahrs.get_yaw();
     const Vector3f& gyro  = ahrs.get_gyro(); 
 
     const float pitch_rad = radians(pitch_deg);
@@ -125,8 +123,7 @@ void ModeTurtle::output_to_motors()
 
     const float pitch_rate_dps = degrees(gyro.y); 
     const float roll_rate_dps  = degrees(gyro.x); 
-    const float yaw_rate_dps = degrees(gyro.z);
-
+    const float yaw_rate_dps   = degrees(gyro.z);
 
     arm_motors();
 
@@ -137,15 +134,39 @@ void ModeTurtle::output_to_motors()
     };
 
     // ---------------------------------------------------------
-    // 3. PITCH AXIS CONTROL (Motors 1 & 4 / Index 0 & 3)
+    // EARTH-FRAME SETPOINT ACCUMULATION
     // ---------------------------------------------------------
+    // Stick inputs are in body frame. We rotate them into earth frame
+    // for accumulation so that the target tilt direction is fixed in
+    // the world regardless of yaw.
     float stick_pitch = rc().channel(1)->norm_input();
     stick_pitch = apply_deadband(stick_pitch, 0.05f);
+    float stick_roll = rc().channel(0)->norm_input();
+    stick_roll = apply_deadband(stick_roll, 0.05f);
 
-    target_pitch_integrated += stick_pitch * 0.001f; 
-    target_pitch_integrated = constrain_float(target_pitch_integrated, -60.0f, 60.0f);
+    const float cy = cosf(yaw_deg);
+    const float sy = sinf(yaw_deg);
 
+    // Body-to-earth rotation for stick inputs
+    target_earth_x += (stick_pitch * cy + stick_roll * sy) * 0.001f;
+    target_earth_y += (stick_pitch * sy - stick_roll * cy) * 0.001f;
+
+    // Clamp earth-frame magnitude
+    const float max_tilt = 60.0f;
+    target_earth_x = constrain_float(target_earth_x, -max_tilt, max_tilt);
+    target_earth_y = constrain_float(target_earth_y, -max_tilt, max_tilt);
+
+    // Earth-to-body rotation to get body-frame targets for PD control
+    // Matches user's sign convention: pitch=-0.47,yaw=0 → pitch=0,roll=+0.47 at yaw=-π/2
+    float body_pitch_target = target_earth_x * cy + target_earth_y * sy;
+    float body_roll_target  = target_earth_x * sy - target_earth_y * cy;
+
+    // ---------------------------------------------------------
+    // 3. PITCH AXIS CONTROL (Motors 1 & 4 / Index 0 & 3)
+    // ---------------------------------------------------------
+    // Gravity feedforward (original working approach)
     float force_p = mass * gravity_mss * sinf(pitch_rad);
+    
     float omega_p_total = 0.0f;
     if (fabsf(force_p) > 0.0001f) {
         omega_p_total = sqrtf(fabsf(force_p) / kc) * (force_p > 0 ? 1.0f : -1.0f);
@@ -155,24 +176,19 @@ void ModeTurtle::output_to_motors()
 
     const float kp_p = 0.1f;
     const float kd_p = 0.01f;
-    float pd_p = ((target_pitch_integrated - pitch_deg) * kp_p) + ((0.0f - pitch_rate_dps) * kd_p);
+    float pd_p = ((body_pitch_target - pitch_deg) * kp_p) + ((0.0f - pitch_rate_dps) * kd_p);
 
     float out_p = constrain_float(0.5f + ff_p + pd_p, 0.0f, 1.0f);
     
-    // Counter-rotating pitch outputs (Index 0 CCW, Index 3 CW mirrored)
     float out_p_ccw = out_p;
     float out_p_cw  = 1.0f - out_p;
 
     // ---------------------------------------------------------
     // 4. ROLL & YAW AXIS CONTROL (Motors 2 & 3 / Index 1 & 2)
     // ---------------------------------------------------------
-    float stick_roll = rc().channel(0)->norm_input();
-    stick_roll = apply_deadband(stick_roll, 0.05f);
-
-    target_roll_integrated += stick_roll * 0.001f; 
-    target_roll_integrated = constrain_float(target_roll_integrated, -60.0f, 60.0f);
-
+    // Gravity feedforward (original working approach)
     float force_r = mass * gravity_mss * sinf(roll_rad);
+
     float omega_r_total = 0.0f;
     if (fabsf(force_r) > 0.0001f) {
         omega_r_total = sqrtf(fabsf(force_r) / kc) * (force_r > 0 ? 1.0f : -1.0f);
@@ -182,7 +198,7 @@ void ModeTurtle::output_to_motors()
 
     const float kp_r = 0.1f; 
     const float kd_r = 0.01f;
-    float pd_r = ((target_roll_integrated - roll_deg) * kp_r) + ((0.0f - roll_rate_dps) * kd_r);
+    float pd_r = ((body_roll_target - roll_deg) * kp_r) + ((0.0f - roll_rate_dps) * kd_r);
 
     float stick_yaw = rc().channel(3)->norm_input();
     stick_yaw = apply_deadband(stick_yaw, 0.05f);
@@ -190,7 +206,7 @@ void ModeTurtle::output_to_motors()
     target_yaw_integrated += stick_yaw * 0.01f; 
     target_yaw_integrated = constrain_float(target_yaw_integrated, -60.0f, 60.0f);
 
-    const float kp_y = 0.5f;
+    const float kp_y = 0.25f;
     const float kd_y = 0.01f;
     float pd_y = ((target_yaw_integrated - yaw_deg) * kp_y) + ((0.0f - yaw_rate_dps) * kd_y);
 
@@ -212,11 +228,8 @@ void ModeTurtle::output_to_motors()
     motors->rc_write(2, pwm_min + (pwm_range * constrain_float(out_r_ccw, 0.0f, 1.0f)));
     motors->rc_write(3, pwm_min + (pwm_range * constrain_float(out_r_cw, 0.0f, 1.0f)));
 
-
-
-    gcs().send_text(MAV_SEVERITY_INFO, "P:%.3f R:%.3f Y:%.3f", (double)pd_p, (double)pd_r, (double)pd_y);
+    gcs().send_text(MAV_SEVERITY_INFO, "P:%.3f R:%.3f Y:%.3f", (double)pitch_deg, (double)roll_deg, (double)yaw_deg);
 }
-
 #endif
 
 

@@ -1853,9 +1853,10 @@ private:
     float motors_output;
     Vector2f motors_input;
     uint32_t last_throttle_warning_output_ms;
-    float target_pitch_integrated;
-    float target_roll_integrated;
+    float target_earth_x;       // earth-frame tilt setpoint (North component)
+    float target_earth_y;       // earth-frame tilt setpoint (East component)
     float target_yaw_integrated;
+    
 };
 #endif
 
