@@ -48,7 +48,7 @@ FLTMODE4        28
 FLTMODE5        28
 FLTMODE6		28
 SIM_BARO_RND    0
-MOT_3D_ADMSK    15
+MOT_3D_ADMSK    0 #15 for uav
 MOT_3D_DEADZONE 50
 # we need small INS_ACC offsets so INS is recognised as being calibrated
 INS_ACCOFFS_X   0.001

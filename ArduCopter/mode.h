@@ -1856,6 +1856,11 @@ private:
     float target_earth_x;       // earth-frame tilt setpoint (North component)
     float target_earth_y;       // earth-frame tilt setpoint (East component)
     float target_yaw_integrated;
+
+    float pitch_integrator;
+    float roll_integrator;
+    float yaw_integrator;
+        
     
 };
 #endif

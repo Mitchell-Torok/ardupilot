@@ -90,6 +90,300 @@ void ModeTurtle::run()
 
 }
 
+void ModeTurtle::output_to_motors()
+{
+    // 1. SAFETY
+    if (copter.failsafe.radio || rc().channel(4)->get_radio_in() < 1800) {
+
+
+        gcs().send_text(MAV_SEVERITY_INFO, "Turtle Mode: OFF %2.f", (double)rc().channel(4)->get_radio_in());
+        motors->rc_write(0, 0.0f);
+        motors->rc_write(1, 0.0f);
+        disarm_motors();
+        return;
+    }
+    arm_motors();
+
+    // 2. READ INPUTS
+    // Fix: Use get_gyro() for rate and get_roll()/get_pitch() for angles
+    const Vector3f& gyro = ahrs.get_gyro(); 
+    
+    // CORRECTION HERE: access these as functions
+    float current_roll  = ahrs.get_roll();
+    float current_pitch = ahrs.get_pitch();
+    //float current_yaw   = ahrs.get_yaw();
+
+
+    
+    float enable_fault_tolerant = rc().channel(5)->norm_input(); 
+
+
+
+    float roll_stick  = rc().channel(0)->norm_input(); 
+    float pitch_stick = rc().channel(1)->norm_input(); 
+    float yaw_stick   = rc().channel(3)->norm_input();
+        
+    // Throttle (0.0 to 1.0)
+    float throttle_in = (rc().channel(2)->norm_input() + 1.0f) / 2.0f;
+    if (throttle_in < 0.05f) throttle_in = 0.0f;
+
+
+
+    // 5. OUTPUT
+    int16_t pwm_min = motors->get_pwm_output_min();
+    int16_t pwm_max = motors->get_pwm_output_max();
+    int16_t pwm_range = pwm_max - pwm_min;
+    int16_t pwm_mid = (pwm_max + pwm_min) / 2;
+
+
+
+    // --- FAULT TOLERANT BICOPTER CONTROLLER ---
+    // Assumes: 
+    // - S0 is the Bad Servo (right)
+    // - S1 is the Good Servo (left)
+    // - Motor 0 is right, Motor 1 is left
+
+    if (enable_fault_tolerant > 0.5f) {
+
+        // --- A. CONFIGURATION & CONSTANTS ---
+        float arm_length    = 0.25f;      
+        float max_thrust_N  = 30.0f;    // Max thrust per motor
+        float target_spin_rate = 3.0f;  // Rad/s (Slow, stable spin)
+        float s0_stuck_val = 0.00f;      // Current stuck position of S0
+        float Izz = 0.043f;
+
+        // --- B. SLIDING MODE ALTITUDE CONTROLLER ---
+        float current_alt_cm = inertial_nav.get_position_z_up_cm();
+        float current_vel_z  = inertial_nav.get_velocity_z_up_cms();
+        
+        float target_alt_cm = 100.0f; // 10 Meters
+        float error_alt     = target_alt_cm - current_alt_cm;
+        
+        // SMC Gains
+        float lambda = 1.5f;   
+        float K_gain = 0.4f;   
+        float phi    = 50.0f;  
+        float hover_throt = 0.3f; 
+
+        float S = (lambda * error_alt) - current_vel_z;
+        float saturation = constrain_float(S / phi, -1.0f, 1.0f);
+        float smc_output = hover_throt + (K_gain * saturation);
+        
+        smc_output = constrain_float(smc_output, 0.1f, 0.9f);
+
+        // Convert SMC 0-1 range to total Newtons
+        float f_total_req_N = smc_output * (2.0f * max_thrust_N);
+
+        float current_rate = fabsf(gyro.z);
+        
+        // 1. Calculate Desired Angular Acceleration (Alpha)
+        // P-loop: How fast we want to change spin speed (rad/s^2)
+        float alpha_cmd = 10.0f * (target_spin_rate - current_rate); 
+        
+
+        float total_torque_req = (Izz * alpha_cmd);
+
+        float torque_term = (2.0f * total_torque_req) / MAX(arm_length * f_total_req_N, 0.5f);
+        float tan_theta_1 = tanf(s0_stuck_val) + torque_term;
+        float theta_1_raw = atanf(tan_theta_1);
+        float theta_1_ff = -1.0f * constrain_float(theta_1_raw, -1.0f, 1.0f);
+
+
+        // --- D. SOLVE FOR THRUST SPLIT (Body-Roll Balance) ---
+        float base_lift = f_total_req_N / 2.0f;
+
+        float roll_error = 0.0f - current_roll;
+        float roll_correction = roll_error * 0.01f;
+        
+        float f0_lift = base_lift + roll_correction;
+        float f1_lift = base_lift - roll_correction;
+
+        float f0_total = f0_lift / MAX(cosf(s0_stuck_val), 0.1f);
+        float f1_total = f1_lift / MAX(cosf(theta_1_ff), 0.1f);
+
+        float m0_out = f0_total / max_thrust_N;
+        float m1_out = f1_total / max_thrust_N;
+
+
+        // --- F. FINAL OUTPUT ---
+        // Servo 0: Locked
+        motors->rc_write(2, pwm_mid + (int16_t)(s0_stuck_val * pwm_range)); 
+        motors->rc_write(3, pwm_mid + (int16_t)(constrain_float(theta_1_ff, -1.0f, 1.0f) * pwm_range)); 
+
+        motors->rc_write(0, pwm_min + (int16_t)(constrain_float(m0_out, 0.0f, 1.0f) * pwm_range)); 
+        motors->rc_write(1, pwm_min + (int16_t)(constrain_float(m1_out, 0.0f, 1.0f) * pwm_range)); 
+
+        gcs().send_text(MAV_SEVERITY_INFO, "Alt:%.0f T1:%.2f M0:%.2ff M0:%.2ff",  (double)alpha_cmd, (double)theta_1_ff, (double)gyro.z, (double) current_roll);
+
+    } else {
+        gcs().send_text(MAV_SEVERITY_INFO, "Bicopter Mode: NORMAL MODE");
+
+
+
+        // 3. CONTROL LOGIC
+        // Set max tilt angle (e.g. 45 degrees in radians)
+        const float MAX_ANGLE = radians(45.0f); 
+        const float MAX_YAW_RATE = radians(200.0f);
+
+        // --- PITCH (Collective Servo Tilt) ---
+        // 1. Angle Controller (Outer Loop)
+        float target_pitch_angle = pitch_stick * MAX_ANGLE;
+        float pitch_angle_error = target_pitch_angle - current_pitch;
+        
+        float K_p_angle_pitch = 4.5f; 
+        float target_pitch_rate = pitch_angle_error * K_p_angle_pitch;
+
+        // 2. Rate Controller (Inner Loop)
+        float pitch_rate_error = target_pitch_rate - gyro.y;
+        float K_p_rate_pitch = 0.30f; 
+        
+        float pitch_out = pitch_rate_error * K_p_rate_pitch;
+
+        // --- ROLL (Differential Thrust) ---
+        float target_roll_angle = roll_stick * MAX_ANGLE;
+        float roll_angle_error = target_roll_angle - current_roll;
+        
+        float K_p_angle_roll = 4.5f;
+        float target_roll_rate = roll_angle_error * K_p_angle_roll;
+
+        float roll_rate_error = target_roll_rate - gyro.x;
+        float K_p_rate_roll = 0.20f;
+        float roll_out = roll_rate_error * K_p_rate_roll;
+
+        // --- YAW (Differential Servo Tilt) ---
+        // Yaw usually stays as a Rate controller
+        float target_yaw_rate = yaw_stick * MAX_YAW_RATE;
+        float yaw_error = target_yaw_rate - gyro.z;
+        float K_p_yaw = 0.30f;
+        float yaw_out = yaw_error * K_p_yaw;
+
+        // 4. MIXER
+        float motor_left  = throttle_in - roll_out;
+        float motor_right = throttle_in + roll_out;
+
+        float servo_left  = pitch_out + yaw_out;
+        float servo_right = pitch_out - yaw_out;
+
+
+
+        motors->rc_write(0, pwm_min + (int16_t)(constrain_float(motor_left, 0.0f, 1.0f) * pwm_range));
+        motors->rc_write(1, pwm_min + (int16_t)(constrain_float(motor_right, 0.0f, 1.0f) * pwm_range));
+
+        float servo_scaler = 0.6f; 
+        
+        int16_t s0_pwm = pwm_mid + (int16_t)(constrain_float(servo_left, -1.0f, 1.0f) * pwm_range * servo_scaler);
+        int16_t s1_pwm = pwm_mid + (int16_t)(constrain_float(servo_right, -1.0f, 1.0f) * pwm_range * servo_scaler);
+
+        motors->rc_write(2, s0_pwm);
+        motors->rc_write(3, s1_pwm);
+
+    }
+
+    // Optional: Log errors to Ground Station for tuning
+    //gcs().send_text(MAV_SEVERITY_INFO, "P_Ang:%.2f P_Rate:%.2f",  (double)button_1, (double)button_2);
+}
+#endif
+
+
+
+
+
+
+//SWUNG UAV
+
+/*
+#include "Copter.h"
+
+#if MODE_TURTLE_ENABLED
+
+#define CRASH_FLIP_EXPO 35.0f
+#define CRASH_FLIP_STICK_MINF 0.15f
+#define power3(x) ((x) * (x) * (x))
+
+bool ModeTurtle::init(bool ignore_checks)
+{
+    
+    // do not enter the mode when already armed or when flying
+    if (motors->armed() || SRV_Channels::get_dshot_esc_type() == 0) {
+        return false;
+    }
+
+    // perform minimal arming checks
+    if (!copter.mavlink_motor_control_check(*gcs().chan(0), true, "Turtle Mode")) {
+        return false;
+    }
+
+
+    // turn on notify leds
+    AP_Notify::flags.esc_calibration = true;
+
+    return true;
+}
+
+void ModeTurtle::arm_motors()
+{
+    if (hal.util->get_soft_armed()) {
+        return;
+    }
+
+    motors->set_spoolup_block(false);
+    hal.rcout->disable_channel_mask_updates();
+    motors->armed(true);
+    hal.util->set_soft_armed(true);
+}
+
+bool ModeTurtle::allows_arming(AP_Arming::Method method) const
+{
+    return true;
+}
+
+void ModeTurtle::exit()
+{
+    disarm_motors();
+    AP_Notify::flags.esc_calibration = false;
+}
+
+void ModeTurtle::disarm_motors()
+{
+    if (!hal.util->get_soft_armed()) {
+        return;
+    }
+
+    // disarm
+    motors->armed(false);
+    hal.util->set_soft_armed(false);
+    hal.rcout->enable_channel_mask_updates();
+}
+
+void ModeTurtle::change_motor_direction(bool reverse)
+{
+    AP_HAL::RCOutput::BLHeliDshotCommand direction = reverse ? AP_HAL::RCOutput::DSHOT_REVERSE : AP_HAL::RCOutput::DSHOT_NORMAL;
+    AP_HAL::RCOutput::BLHeliDshotCommand inverse_direction = reverse ? AP_HAL::RCOutput::DSHOT_NORMAL : AP_HAL::RCOutput::DSHOT_REVERSE;
+
+    if (!hal.rcout->get_reversed_mask()) {
+        hal.rcout->send_dshot_command(direction, AP_HAL::RCOutput::ALL_CHANNELS, 0, 10, true);
+    } else {
+        for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; ++i) {
+            if (!motors->is_motor_enabled(i)) {
+                continue;
+            }
+
+            if ((hal.rcout->get_reversed_mask() & (1U << i)) == 0) {
+                hal.rcout->send_dshot_command(direction, i, 0, 10, true);
+            } else {
+                hal.rcout->send_dshot_command(inverse_direction, i, 0, 10, true);
+            }
+        }
+    }
+}
+
+void ModeTurtle::run()
+{
+
+
+
+}
+
 
 
 void ModeTurtle::output_to_motors()
@@ -232,6 +526,10 @@ void ModeTurtle::output_to_motors()
 }
 #endif
 
+*/
+
+
+
 
 
 
@@ -242,8 +540,6 @@ void ModeTurtle::output_to_motors()
 
 
 //OMNICOPTER
-
-
 
 /*
 
