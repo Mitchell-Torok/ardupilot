@@ -90,44 +90,37 @@ void ModeTurtle::run()
 
 }
 
+
+
 void ModeTurtle::output_to_motors()
 {
     // 1. SAFETY
     if (copter.failsafe.radio || rc().channel(4)->get_radio_in() < 1800) {
-
-
         gcs().send_text(MAV_SEVERITY_INFO, "Turtle Mode: OFF %2.f", (double)rc().channel(4)->get_radio_in());
         motors->rc_write(0, 0.0f);
         motors->rc_write(1, 0.0f);
         disarm_motors();
         return;
     }
+
     arm_motors();
 
     // 2. READ INPUTS
-    // Fix: Use get_gyro() for rate and get_roll()/get_pitch() for angles
-    const Vector3f& gyro = ahrs.get_gyro(); 
-    
-    // CORRECTION HERE: access these as functions
-    float current_roll  = ahrs.get_roll();
+    const Vector3f& gyro = ahrs.get_gyro();
+    float current_roll = ahrs.get_roll();
     float current_pitch = ahrs.get_pitch();
-    //float current_yaw   = ahrs.get_yaw();
 
+    //float current_yaw = ahrs.get_yaw();
 
-    
-    float enable_fault_tolerant = rc().channel(5)->norm_input(); 
+    float enable_fault_tolerant = rc().channel(5)->norm_input();
 
+    float roll_stick = rc().channel(0)->norm_input();
+    float pitch_stick = rc().channel(1)->norm_input();
+    float yaw_stick = rc().channel(3)->norm_input();
 
-
-    float roll_stick  = rc().channel(0)->norm_input(); 
-    float pitch_stick = rc().channel(1)->norm_input(); 
-    float yaw_stick   = rc().channel(3)->norm_input();
-        
     // Throttle (0.0 to 1.0)
     float throttle_in = (rc().channel(2)->norm_input() + 1.0f) / 2.0f;
     if (throttle_in < 0.05f) throttle_in = 0.0f;
-
-
 
     // 5. OUTPUT
     int16_t pwm_min = motors->get_pwm_output_min();
@@ -137,112 +130,157 @@ void ModeTurtle::output_to_motors()
 
 
 
+
+
+    // Get home location
+    //const Location &home = ahrs.get_home();
+
+    // Get current location
+    //const Location &current = copter.current_loc;
+
+    // Displacement as a NED vector (in metres)
+    //Vector3f disp = home.get_distance_NED(current);
+
     // --- FAULT TOLERANT BICOPTER CONTROLLER ---
-    // Assumes: 
+    // Assumes:
     // - S0 is the Bad Servo (right)
     // - S1 is the Good Servo (left)
     // - Motor 0 is right, Motor 1 is left
 
     if (enable_fault_tolerant > 0.5f) {
 
-        // --- A. CONFIGURATION & CONSTANTS ---
-        float arm_length    = 0.25f;      
-        float max_thrust_N  = 30.0f;    // Max thrust per motor
-        float target_spin_rate = 3.0f;  // Rad/s (Slow, stable spin)
-        float s0_stuck_val = 0.00f;      // Current stuck position of S0
-        float Izz = 0.043f;
 
-        // --- B. SLIDING MODE ALTITUDE CONTROLLER ---
-        float current_alt_cm = inertial_nav.get_position_z_up_cm();
-        float current_vel_z  = inertial_nav.get_velocity_z_up_cms();
+
+
+
+
+
+float max_thrust_N = 20.0f; // Max thrust of ONE motor (Newtons) at 100% throttle
+
+        // Fault Parameters
+        float s0_stuck_val = 0.1f; // Example: Stuck at 30 deg (0.52 rads)
+        motors->rc_write(2, pwm_mid + (int16_t)(s0_stuck_val * pwm_range)); // Locked S0
+
+        // --- B. HARDCODED MAX THROTTLE (Replacing SMC) ---
+        // Simulating maximum lift so the thrust vectoring math still calculates valid servo angles
+        float f_lift_base = max_thrust_N; 
+
+        // --- C. COMPLEMENTARY FILTERS (Roll & Pitch) ---
+        // COMPLETELY BYPASSING AHRS
         
-        float target_alt_cm = 100.0f; // 10 Meters
-        float error_alt     = target_alt_cm - current_alt_cm;
+        // 1. Read raw sensor data directly from INS
+        Vector3f accel_raw = copter.ins.get_accel();
+        const Vector3f& gyro_raw = copter.ins.get_gyro(); 
+
+        // 2. Calculate raw angles from accelerometer (Gravity correction vectors)
+        float accel_roll_rad = atan2f(-accel_raw.y, -accel_raw.z);
+        float accel_pitch_rad = atan2f(accel_raw.x, -accel_raw.z);
+
+        // 3. Complementary Filters for Roll and Pitch Estimation
+        static float estimated_roll_rad = 0.0f;
+        static float estimated_pitch_rad = 0.0f;
         
-        // SMC Gains
-        float lambda = 1.5f;   
-        float K_gain = 0.4f;   
-        float phi    = 50.0f;  
-        float hover_throt = 0.3f; 
+        float dt = 0.0025f; // Assuming 400Hz loop rate
+        float alpha = 0.98f; 
 
-        float S = (lambda * error_alt) - current_vel_z;
-        float saturation = constrain_float(S / phi, -1.0f, 1.0f);
-        float smc_output = hover_throt + (K_gain * saturation);
+        // Integrate angular velocities and fuse with accelerometer angles
+        estimated_roll_rad = alpha * (estimated_roll_rad + (gyro_raw.x * dt)) + (1.0f - alpha) * accel_roll_rad;
+        estimated_pitch_rad = alpha * (estimated_pitch_rad + (gyro_raw.y * dt)) + (1.0f - alpha) * accel_pitch_rad;
         
-        smc_output = constrain_float(smc_output, 0.1f, 0.9f);
-
-        // Convert SMC 0-1 range to total Newtons
-        float f_total_req_N = smc_output * (2.0f * max_thrust_N);
-
-        float current_rate = fabsf(gyro.z);
+        // --- D. P ATTITUDE CONTROLLER (Roll & Pitch) ---
         
-        // 1. Calculate Desired Angular Acceleration (Alpha)
-        // P-loop: How fast we want to change spin speed (rad/s^2)
-        float alpha_cmd = 10.0f * (target_spin_rate - current_rate); 
+        // 1. Roll Control (Manual via RC)
+        // Read roll stick input (-1.0 to 1.0) on standard Channel 0
+        float max_roll_rad = radians(45.0f); // Limit command to 45 degrees
         
-
-        float total_torque_req = (Izz * alpha_cmd);
-
-        float torque_term = (2.0f * total_torque_req) / MAX(arm_length * f_total_req_N, 0.5f);
-        float tan_theta_1 = tanf(s0_stuck_val) + torque_term;
-        float theta_1_raw = atanf(tan_theta_1);
-        float theta_1_ff = -1.0f * constrain_float(theta_1_raw, -1.0f, 1.0f);
-
-
-        // --- D. SOLVE FOR THRUST SPLIT (Body-Roll Balance) ---
-        float base_lift = f_total_req_N / 2.0f;
-
-        float roll_error = 0.0f - current_roll;
-        float roll_correction = roll_error * 0.01f;
+        float target_roll_rad = roll_stick * max_roll_rad;
+        float kp_roll = 2.0f; // Proportional gain for roll - you will need to tune this
         
-        float f0_lift = base_lift + roll_correction;
-        float f1_lift = base_lift - roll_correction;
+        float raw_roll_force_N = (target_roll_rad - estimated_roll_rad) * kp_roll;
 
-        float f0_total = f0_lift / MAX(cosf(s0_stuck_val), 0.1f);
-        float f1_total = f1_lift / MAX(cosf(theta_1_ff), 0.1f);
+        // 2. Pitch Control (Drive pitch to 0)
+        float target_pitch_rad = 0.0f;
+        float kp_pitch = 2.0f; // Proportional gain for pitch
 
-        float m0_out = f0_total / max_thrust_N;
-        float m1_out = f1_total / max_thrust_N;
+        float raw_pitch_force_N = (target_pitch_rad - estimated_pitch_rad) * kp_pitch;
+
+        // --- E. PHASE ADVANCE MIXER & CLAMPING ---
+        // Filter the Z gyro heavily so the phase angle doesn't vibrate and cause Coning
+        static float filtered_gyro_z = 0.0f;
+        filtered_gyro_z += 0.05f * (gyro_raw.z - filtered_gyro_z);
+
+        // Fine-Tune the Actuator Delay
+        float actuator_delay_sec = 0.00f;
+        float phase_angle_rad = filtered_gyro_z * actuator_delay_sec;
+
+        float cos_phi = cosf(phase_angle_rad);
+        float sin_phi = sinf(phase_angle_rad);
+
+        float roll_force_mixed_N = (raw_roll_force_N * cos_phi) - (raw_pitch_force_N * sin_phi);
+        float pitch_force_mixed_N = (raw_roll_force_N * sin_phi) + (raw_pitch_force_N * cos_phi);
+
+        // Dynamic Attitude Clamping
+        float max_available_differential_N = MAX(f_lift_base - 0.5f, 0.0f);
+        roll_force_mixed_N = constrain_float(roll_force_mixed_N, -max_available_differential_N, max_available_differential_N);
+        pitch_force_mixed_N = constrain_float(pitch_force_mixed_N, -max_available_differential_N, max_available_differential_N);
+
+        // --- F. EXACT THRUST VECTORING ---
+        float m0_out = MAX(f_lift_base + roll_force_mixed_N, 0.05f);
+        float m1_out = MAX(f_lift_base - roll_force_mixed_N, 0.05f);
 
 
-        // --- F. FINAL OUTPUT ---
-        // Servo 0: Locked
-        motors->rc_write(2, pwm_mid + (int16_t)(s0_stuck_val * pwm_range)); 
-        motors->rc_write(3, pwm_mid + (int16_t)(constrain_float(theta_1_ff, -1.0f, 1.0f) * pwm_range)); 
+        float s1_pos = -s0_stuck_val;
 
-        motors->rc_write(0, pwm_min + (int16_t)(constrain_float(m0_out, 0.0f, 1.0f) * pwm_range)); 
-        motors->rc_write(1, pwm_min + (int16_t)(constrain_float(m1_out, 0.0f, 1.0f) * pwm_range)); 
+        motors->rc_write(3, pwm_mid + (int16_t)(constrain_float(s1_pos, -1.0f, 1.0f) * pwm_range));
+        motors->rc_write(0, pwm_min + (int16_t)(m0_out * pwm_range));
+        motors->rc_write(1, pwm_min + (int16_t)(m1_out * pwm_range));
 
-        gcs().send_text(MAV_SEVERITY_INFO, "Alt:%.0f T1:%.2f M0:%.2ff M0:%.2ff",  (double)alpha_cmd, (double)theta_1_ff, (double)gyro.z, (double) current_roll);
+        // --- H. RATE LIMITED TERMINAL OUTPUT ---
+        static uint16_t print_counter = 0;
+        if (print_counter++ >= 200) { // Prints roughly every 500ms at 400Hz
+            // R = Roll (deg), P = Pitch (deg), Gx/y/z = Gyro angular velocity in rad/sec
+            gcs().send_text(MAV_SEVERITY_INFO, "R:%.1f P:%.1f Gx:%.2f Gy:%.2f Gz:%.2f", 
+                            (double)degrees(estimated_roll_rad),
+                            (double)degrees(estimated_pitch_rad),
+                            (double)gyro_raw.x,
+                            (double)gyro_raw.y,
+                            (double)gyro_raw.z);
+            print_counter = 0;
+        }
+
+
+
+
+
+
+
+
+
 
     } else {
-        gcs().send_text(MAV_SEVERITY_INFO, "Bicopter Mode: NORMAL MODE");
-
-
 
         // 3. CONTROL LOGIC
         // Set max tilt angle (e.g. 45 degrees in radians)
-        const float MAX_ANGLE = radians(45.0f); 
+        const float MAX_ANGLE = radians(45.0f);
         const float MAX_YAW_RATE = radians(200.0f);
 
         // --- PITCH (Collective Servo Tilt) ---
         // 1. Angle Controller (Outer Loop)
         float target_pitch_angle = pitch_stick * MAX_ANGLE;
         float pitch_angle_error = target_pitch_angle - current_pitch;
-        
-        float K_p_angle_pitch = 4.5f; 
+
+        float K_p_angle_pitch = 4.5f;
         float target_pitch_rate = pitch_angle_error * K_p_angle_pitch;
 
         // 2. Rate Controller (Inner Loop)
         float pitch_rate_error = target_pitch_rate - gyro.y;
-        float K_p_rate_pitch = 0.30f; 
-        
+        float K_p_rate_pitch = 0.30f;
         float pitch_out = pitch_rate_error * K_p_rate_pitch;
 
         // --- ROLL (Differential Thrust) ---
         float target_roll_angle = roll_stick * MAX_ANGLE;
         float roll_angle_error = target_roll_angle - current_roll;
-        
+
         float K_p_angle_roll = 4.5f;
         float target_roll_rate = roll_angle_error * K_p_angle_roll;
 
@@ -258,29 +296,24 @@ void ModeTurtle::output_to_motors()
         float yaw_out = yaw_error * K_p_yaw;
 
         // 4. MIXER
-        float motor_left  = throttle_in - roll_out;
+        float motor_left = throttle_in - roll_out;
         float motor_right = throttle_in + roll_out;
 
-        float servo_left  = pitch_out + yaw_out;
+        float servo_left = pitch_out + yaw_out;
         float servo_right = pitch_out - yaw_out;
-
-
 
         motors->rc_write(0, pwm_min + (int16_t)(constrain_float(motor_left, 0.0f, 1.0f) * pwm_range));
         motors->rc_write(1, pwm_min + (int16_t)(constrain_float(motor_right, 0.0f, 1.0f) * pwm_range));
 
-        float servo_scaler = 0.6f; 
-        
+        float servo_scaler = 0.6f;
         int16_t s0_pwm = pwm_mid + (int16_t)(constrain_float(servo_left, -1.0f, 1.0f) * pwm_range * servo_scaler);
         int16_t s1_pwm = pwm_mid + (int16_t)(constrain_float(servo_right, -1.0f, 1.0f) * pwm_range * servo_scaler);
 
         motors->rc_write(2, s0_pwm);
         motors->rc_write(3, s1_pwm);
-
     }
 
-    // Optional: Log errors to Ground Station for tuning
-    //gcs().send_text(MAV_SEVERITY_INFO, "P_Ang:%.2f P_Rate:%.2f",  (double)button_1, (double)button_2);
+    //gcs().send_text(MAV_SEVERITY_INFO, "P_Ang:%.2f P_Rate:%.2f", (double)button_1, (double)button_2);
 }
 #endif
 

@@ -1860,7 +1860,30 @@ private:
     float pitch_integrator;
     float roll_integrator;
     float yaw_integrator;
-        
+    Quaternion spin_attitude_quat;
+    bool spin_quat_initialized;
+    bool is_spinning_fast;
+    uint32_t last_update_us;
+
+    // Baro-based altitude fallback for high-spin state
+    float baro_alt_ref_cm;          // barometer altitude at moment of spin-up (reference)
+    bool baro_alt_ref_set;          // true once reference is captured
+    float last_baro_vel_cm;         // finite-differenced vertical velocity from baro
+    float last_baro_alt_cm;         // previous baro reading for velocity estimation
+    uint32_t last_baro_us;          // timestamp of previous baro reading
+
+    // 2D position controller home reference
+    float pos_home_north_cm;        // captured home position (North, cm)
+    float pos_home_east_cm;         // captured home position (East, cm)
+    bool pos_home_set;              // true once home is captured
+
+    // Custom spin-aware attitude estimator
+    void update_spin_attitude(float &est_roll, float &est_pitch, float &est_yaw);
+
+    // Position-differentiated Z velocity estimator (robust to spin)
+    uint32_t vel_est_last_time_us;
+    float vel_est_last_alt_cm;
+    float vel_est_filtered;         // filtered Z velocity in cm/s
     
 };
 #endif
