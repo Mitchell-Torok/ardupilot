@@ -147,107 +147,80 @@ void ModeTurtle::output_to_motors()
     // - S1 is the Good Servo (left)
     // - Motor 0 is right, Motor 1 is left
 
-    if (enable_fault_tolerant > 0.5f) {
 
 
-
-
-
-
-
-float max_thrust_N = 20.0f; // Max thrust of ONE motor (Newtons) at 100% throttle
-
-        // Fault Parameters
-        float s0_stuck_val = 0.1f; // Example: Stuck at 30 deg (0.52 rads)
-        motors->rc_write(2, pwm_mid + (int16_t)(s0_stuck_val * pwm_range)); // Locked S0
-
-        // --- B. HARDCODED MAX THROTTLE (Replacing SMC) ---
-        // Simulating maximum lift so the thrust vectoring math still calculates valid servo angles
-        float f_lift_base = max_thrust_N; 
-
-        // --- C. COMPLEMENTARY FILTERS (Roll & Pitch) ---
-        // COMPLETELY BYPASSING AHRS
-        
-        // 1. Read raw sensor data directly from INS
         Vector3f accel_raw = copter.ins.get_accel();
         const Vector3f& gyro_raw = copter.ins.get_gyro(); 
 
-        // 2. Calculate raw angles from accelerometer (Gravity correction vectors)
+        // 4. COMPLEMENTARY FILTER
         float accel_roll_rad = atan2f(-accel_raw.y, -accel_raw.z);
         float accel_pitch_rad = atan2f(accel_raw.x, -accel_raw.z);
 
-        // 3. Complementary Filters for Roll and Pitch Estimation
         static float estimated_roll_rad = 0.0f;
         static float estimated_pitch_rad = 0.0f;
         
         float dt = 0.0025f; // Assuming 400Hz loop rate
         float alpha = 0.98f; 
 
-        // Integrate angular velocities and fuse with accelerometer angles
         estimated_roll_rad = alpha * (estimated_roll_rad + (gyro_raw.x * dt)) + (1.0f - alpha) * accel_roll_rad;
         estimated_pitch_rad = alpha * (estimated_pitch_rad + (gyro_raw.y * dt)) + (1.0f - alpha) * accel_pitch_rad;
-        
-        // --- D. P ATTITUDE CONTROLLER (Roll & Pitch) ---
-        
-        // 1. Roll Control (Manual via RC)
-        // Read roll stick input (-1.0 to 1.0) on standard Channel 0
-        float max_roll_rad = radians(45.0f); // Limit command to 45 degrees
-        
-        float target_roll_rad = roll_stick * max_roll_rad;
-        float kp_roll = 2.0f; // Proportional gain for roll - you will need to tune this
-        
-        float raw_roll_force_N = (target_roll_rad - estimated_roll_rad) * kp_roll;
-
-        // 2. Pitch Control (Drive pitch to 0)
-        float target_pitch_rad = 0.0f;
-        float kp_pitch = 2.0f; // Proportional gain for pitch
-
-        float raw_pitch_force_N = (target_pitch_rad - estimated_pitch_rad) * kp_pitch;
-
-        // --- E. PHASE ADVANCE MIXER & CLAMPING ---
-        // Filter the Z gyro heavily so the phase angle doesn't vibrate and cause Coning
-        static float filtered_gyro_z = 0.0f;
-        filtered_gyro_z += 0.05f * (gyro_raw.z - filtered_gyro_z);
-
-        // Fine-Tune the Actuator Delay
-        float actuator_delay_sec = 0.00f;
-        float phase_angle_rad = filtered_gyro_z * actuator_delay_sec;
-
-        float cos_phi = cosf(phase_angle_rad);
-        float sin_phi = sinf(phase_angle_rad);
-
-        float roll_force_mixed_N = (raw_roll_force_N * cos_phi) - (raw_pitch_force_N * sin_phi);
-        float pitch_force_mixed_N = (raw_roll_force_N * sin_phi) + (raw_pitch_force_N * cos_phi);
-
-        // Dynamic Attitude Clamping
-        float max_available_differential_N = MAX(f_lift_base - 0.5f, 0.0f);
-        roll_force_mixed_N = constrain_float(roll_force_mixed_N, -max_available_differential_N, max_available_differential_N);
-        pitch_force_mixed_N = constrain_float(pitch_force_mixed_N, -max_available_differential_N, max_available_differential_N);
-
-        // --- F. EXACT THRUST VECTORING ---
-        float m0_out = MAX(f_lift_base + roll_force_mixed_N, 0.05f);
-        float m1_out = MAX(f_lift_base - roll_force_mixed_N, 0.05f);
 
 
-        float s1_pos = -s0_stuck_val;
+        gcs().send_text(MAV_SEVERITY_INFO, "Est R:%.2f P:%.2f| GyroZ:%.2f", 
+                            (double)degrees(estimated_roll_rad),
+                            (double)degrees(estimated_pitch_rad),
+                            (double)gyro_raw.z);
 
+
+
+    if (enable_fault_tolerant > 0.5f) {
+
+
+
+
+        // Fault Parameters
+        float s0_stuck_val = 0.2f; 
+        motors->rc_write(2, pwm_mid + (int16_t)(s0_stuck_val * pwm_range));
+        float s1_pos = -s0_stuck_val; 
         motors->rc_write(3, pwm_mid + (int16_t)(constrain_float(s1_pos, -1.0f, 1.0f) * pwm_range));
+
+
+
+
+        // 5. TELEMETRY
+        // Print Estimated Roll/Pitch, AHRS Roll/Pitch, and Body Z Angular Velocity (Gyro Z)
+
+
+        float roll_error = 0.0f - estimated_pitch_rad;
+        float roll_rate = gyro_raw.x; 
+
+        // 2. PD CONTROLLER (Implicit Phase Mixer)
+        float kp = 0.15f;  // Controls the "Roll" phase response
+        float kd = 0.0000000001f;  // Controls the "Pitch" phase response (phase shift)
+
+        // Calculate the required differential thrust
+        float body_roll_command = (roll_error * kp) + (roll_rate * kd);
+
+        // Limit the command authority to leave room for base throttle
+        float max_differential = 0.4f;
+        body_roll_command = constrain_float(body_roll_command, -max_differential, max_differential);
+
+        // 3. APPLY TO MOTORS (Differential Thrust)
+        float base_throttle = 0.5f; // Hover throttle
+
+        // Motor 0 (Right) and Motor 1 (Left)
+        float m0_out = constrain_float(base_throttle - body_roll_command, 0.0f, 1.0f);
+        float m1_out = constrain_float(base_throttle + body_roll_command, 0.0f, 1.0f);
+
         motors->rc_write(0, pwm_min + (int16_t)(m0_out * pwm_range));
         motors->rc_write(1, pwm_min + (int16_t)(m1_out * pwm_range));
 
-        // --- H. RATE LIMITED TERMINAL OUTPUT ---
-        static uint16_t print_counter = 0;
-        if (print_counter++ >= 200) { // Prints roughly every 500ms at 400Hz
-            // R = Roll (deg), P = Pitch (deg), Gx/y/z = Gyro angular velocity in rad/sec
-            gcs().send_text(MAV_SEVERITY_INFO, "R:%.1f P:%.1f Gx:%.2f Gy:%.2f Gz:%.2f", 
+
+        // --- 6. TELEMETRY ---
+        gcs().send_text(MAV_SEVERITY_INFO, "Est R:%.2f P:%.2f| GyroZ:%.2f", 
                             (double)degrees(estimated_roll_rad),
                             (double)degrees(estimated_pitch_rad),
-                            (double)gyro_raw.x,
-                            (double)gyro_raw.y,
                             (double)gyro_raw.z);
-            print_counter = 0;
-        }
-
 
 
 
